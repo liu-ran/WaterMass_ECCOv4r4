@@ -1,4 +1,4 @@
-def cal_curve_tranport(ds,diff_left_boundary,diff_right_boundary,diff_up_boundary,diff_down_boundary,diff_above_boundary,diff_below_boundary):
+def cal_transformation_SurfaceIntegral(ds,diff_left_boundary,diff_right_boundary,diff_up_boundary,diff_down_boundary,diff_above_boundary,diff_below_boundary):
         
     DFxE_TH = ds.DFxE_TH  #  degree_C m3 s-1
     DFyE_TH = ds.DFyE_TH  #  degree_C m3 s-1
