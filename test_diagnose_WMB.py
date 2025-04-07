@@ -70,7 +70,7 @@ face_connections = {'face':
 ####  diagnose the water mass budget of the water temperature > 29 degree
 ################################################################################################################
 
-G_mat = cal_g_mat(tbudgetcache)
+G_mat = cal_transformation_VolumeIntegral(tbudgetcache)
 #### 
 
 t2 = 29.25
@@ -83,7 +83,7 @@ boundary, tile_or_face, interior, diff_left_boundary, diff_right_boundary, diff_
 
 G_mat_t2 = (g_mat*interior).compute()
 
-G_mat_method2_t2 = cal_curve_tranport(tbudgetcache, diff_left_boundary,diff_right_boundary,diff_up_boundary,\
+G_mat_method2_t2 = cal_transformation_SurfaceIntegral(tbudgetcache, diff_left_boundary,diff_right_boundary,diff_up_boundary,\
                                    diff_down_boundary,diff_above_boundary,diff_below_boundary)
 
 ####  t>=t - dt/2
@@ -93,7 +93,7 @@ boundary, tile_or_face, interior, diff_left_boundary, diff_right_boundary, diff_
 
 G_mat_t1 = (g_mat*interior).compute()
 
-G_mat_method2_t1 = cal_curve_tranport(tbudgetcache, diff_left_boundary,diff_right_boundary,diff_up_boundary,\
+G_mat_method2_t1 = cal_transformation_SurfaceIntegral(tbudgetcache, diff_left_boundary,diff_right_boundary,diff_up_boundary,\
                                    diff_down_boundary,diff_above_boundary,diff_below_boundary)
 
 
