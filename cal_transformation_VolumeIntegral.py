@@ -1,4 +1,4 @@
-def cal_g_mat(ds): 
+def cal_transformation_VolumeIntegral(ds): 
     DFxE_TH = ds.DFxE_TH  #  degree_C m3 s-1
     DFyE_TH = ds.DFyE_TH  #  degree_C m3 s-1
     DFrE_TH = ds.DFrE_TH  #  degree_C m3 s-1
