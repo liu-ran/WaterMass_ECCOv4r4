@@ -1,3 +1,66 @@
+import numpy as np
+import warnings
+
+__doc__ = """
+Density of Sea Water using linear EOS and POLY3 method.
+Density of Sea Water using the Jackett and McDougall 1995 (JAOT 12) polynomial
+Density of Sea Water using the UNESCO equation of state formula (IES80)
+of Fofonoff and Millard (1983) [FRM83].
+Density of Sea Water using the EOS-10 48-term polynomial.
+"""
+
+# coefficients nonlinear equation of state in pressure coordinates for
+# 1. density of fresh water at p = 0 jmd95 and unesco
+eosJMDCFw = [   999.842594,
+                6.793952e-02,
+              - 9.095290e-03,
+                1.001685e-04,
+              - 1.120083e-06,
+                6.536332e-09,
+            ]
+# 2. density of sea water at p = 0
+eosJMDCSw = [   8.244930e-01,
+              - 4.089900e-03,
+                7.643800e-05,
+              - 8.246700e-07,
+                5.387500e-09,
+              - 5.724660e-03,
+                1.022700e-04,
+              - 1.654600e-06,
+                4.831400e-04,
+            ]
+
+def _check_salinity(s):
+
+    sneg = s<0
+    if np.any(sneg):
+        warnings.warn('found negative salinity values')
+        # warnings.warn('found negative salinity values, reset them to nan')
+        # s[sneg] = np.nan
+
+    return s
+
+def _check_dimensions(s,t,p=np.zeros(())):
+    """
+    Check compatibility of dimensions of input variables and
+
+    Parameters
+    ----------
+    salt : array_like
+        salinity [psu (PSS-78)]
+    theta : array_like
+        potential temperature [degree C (IPTS-68)]
+        same shape as salt
+    p  : pressure [dBar]
+    """
+
+    if s.shape != t.shape or s.shape != p.shape:
+        print('trying to broadcast shapes')
+        np.broadcast(s,t,p)
+
+    return
+
+
 def jmd95(salt,theta,p):
     """
     Computes in-situ density of sea water
