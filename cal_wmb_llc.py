@@ -1,6 +1,7 @@
 import xarray as xr
 from llc_uv_shift import llc_uv_shift
 from extract_boundarys import *
+import numpy as np
 
 def cal_G_diffusion(ds, face_connections, rho_pot=None, boundary_diffs=None):
     DFxE_TH = ds.DFxE_TH.astype('float64').fillna(0.).rename({'i_g': 'i'})
@@ -155,8 +156,37 @@ def cal_G_adv_shift(volcache, ECCOgrid, face_connections, rho_pot=None, boundary
         return G_advection2
     else:
         return (G_advection2*rho_pot).compute()
+def save_G_adv_surfacevolume(volcache, ECCOgrid, face_connections, var_prefix='MASS'):
+    """
+    计算水平体积输运（m^3/s），用于水体质量收支。
+    支持不同变量前缀（如 MASS, STAR）。
+    """
+    ukey = f'UVEL{var_prefix}'
+    vkey = f'VVEL{var_prefix}'
+    #wkey = f'WVEL{var_prefix}'  # 未使用
 
-def save_G_adv_surfacevolume(volcache, ECCOgrid, face_connections, rho_pot=None):
+    # 水平体积通量（m^3/s）
+    utrans = volcache[ukey].astype('float64') * ECCOgrid.drF * ECCOgrid.dyG
+    vtrans = volcache[vkey].astype('float64') * ECCOgrid.drF * ECCOgrid.dxG
+    #wtrans = volcache.WVELMASS * ECCOgrid.rA
+
+    # 清理无效区域
+    utrans = utrans.fillna(0.0).rename({'i_g': 'i'})
+    vtrans = vtrans.fillna(0.0).rename({'j_g': 'j'})
+    #wtrans = wtrans.fillna(0.0).rename({'k_l': 'k'})
+
+    # 跨面偏移（用于边界通量计算）
+    utrans_right = llc_uv_shift(utrans, vtrans, face_connections, shift_x=-1, shift_y=0)
+    vtrans_up    = llc_uv_shift(vtrans, utrans, face_connections, shift_x=0, shift_y=-1)
+
+    return xr.Dataset({
+        'utrans':       utrans.compute(),
+        'utrans_right': utrans_right.compute(),
+        'vtrans':       vtrans.compute(),
+        'vtrans_up':    vtrans_up.compute()
+    })
+
+def save_G_adv_surfacevolume_old(volcache, ECCOgrid, face_connections):
     ### note!!! there is no vertical transport in the watermass budget!!!
     utrans = volcache.UVELMASS.astype('float64') * ECCOgrid.drF * ECCOgrid.dyG 
     vtrans = volcache.VVELMASS.astype('float64') * ECCOgrid.drF * ECCOgrid.dxG 
@@ -307,6 +337,52 @@ def cal_GM_transport(THETA, velGM, face_connections, ECCOgrid, rho_pot=None, bou
         return (G_GM_adv*rho_pot).compute()   
 
 
+def cal_GMlike_transport(THETA, sTHETA, u, v, w, face_connections, ECCOgrid, rho_pot=None, boundary_diffs=None):
+    
+    Tu = get_T_at_u(sTHETA, face_connections,ECCOgrid)
+    Tv = get_T_at_v(sTHETA, face_connections,ECCOgrid)
+    Tw = get_T_at_w(THETA, face_connections,ECCOgrid)
+    
+    #u = velGM.UVELSTAR.astype('float64')
+    #v = velGM.VVELSTAR.astype('float64')
+    #w = velGM.WVELSTAR.astype('float64')
+    utrans = (u*ECCOgrid.dyG*ECCOgrid.drF).rename({'i_g':'i'})*Tu
+    vtrans = (v*ECCOgrid.dxG*ECCOgrid.drF).rename({'j_g':'j'})*Tv
+    wtrans = (w*ECCOgrid.rA).rename({'k_l':'k'})*Tw
+    
+    # u/v/wtrans should be m^3/s
+    # 将 NaN 替换为0, 使得陆地/无效区域对输运贡献=0
+    utrans = utrans.fillna(0.0)
+    vtrans = vtrans.fillna(0.0)
+    wtrans = wtrans.fillna(0.0)
+       
+    utrans_right   = llc_uv_shift(utrans, vtrans, face_connections, shift_x=-1, shift_y=0)
+    vtrans_up      = llc_uv_shift(vtrans, utrans, face_connections, shift_x=0, shift_y=-1)
+    wtrans_below = wtrans.shift(k=-1, fill_value=0.)
+    
+    if boundary_diffs is None:
+        adv_hConvH2_x = utrans_right - utrans
+        adv_hConvH2_y = vtrans_up    - vtrans
+        # Convergence of horizontal advection ( m^3/s)
+        adv_hConvH2 = -( adv_hConvH2_x  +  adv_hConvH2_y )
+        
+        adv_vConvH2 = -(wtrans - wtrans_below )
+    
+        G_GM_adv = (adv_hConvH2 + adv_vConvH2).compute()
+        
+    else:
+        G_GM_adv = -(     utrans      *boundary_diffs.sel(direction='left')  + \
+                          utrans_right*boundary_diffs.sel(direction='right') + \
+                          vtrans      *boundary_diffs.sel(direction='down')  + \
+                          vtrans_up   *boundary_diffs.sel(direction='up')    + \
+                          wtrans      *boundary_diffs.sel(direction='above') + \
+                          wtrans_below*boundary_diffs.sel(direction='below') ).compute()
+    if rho_pot is None:
+        return G_GM_adv
+    else:
+        return (G_GM_adv*rho_pot).compute()  
+        
+
 def cal_g_budgets_all(mass, freshwater, adv, g_mix, g_heat, tcenters, dt, THETA, more_or_less,maskregion=None,g_gm=None):
     import numpy as np
     # note!!! we want Mass data with 2 more days since it use center difference.
@@ -359,7 +435,6 @@ def cal_g_budgets_all(mass, freshwater, adv, g_mix, g_heat, tcenters, dt, THETA,
         if maskregion is not None:
             mask_right = mask_right & maskregion
             mask_left  = mask_left  & maskregion
-
         #
         g_mix_right = (g_mix*mask_right).sum(['face','k','j','i']).compute()
         g_mix_left  = (g_mix*mask_left ).sum(['face','k','j','i']).compute()
@@ -424,4 +499,361 @@ def cal_g_budgets_all(mass, freshwater, adv, g_mix, g_heat, tcenters, dt, THETA,
     g_gm_da    = xr.concat(g_gm_all, dim='tcenters').transpose('tcenters', 'time')
         
     return xr.Dataset({'g_tend':g_tend_da,'g_mix': g_mix_da, 'g_heat': g_heat_da, 'g_salt':g_fresh_da, 'g_adv':g_adv_da, 'g_gm':g_gm_da})
+
+
+
+def compute_flux_difference(var: xr.DataArray,
+                            mask_left: xr.DataArray,
+                            mask_right: xr.DataArray,
+                            tleft: float,
+                            tright: float,
+                            tcenter: float,
+                            dims=['face', 'k', 'j', 'i']) -> xr.DataArray:
+    """
+    Compute flux difference across left/right masks and normalize by time interval.
+
+    Parameters:
+    - var: xarray.DataArray, the flux variable (e.g., g_mix_h, g_heat)
+    - mask_left, mask_right: xarray.DataArray, boolean masks
+    - tleft, tright: float, time boundaries
+    - tcenter: float, center time for output coordinate
+    - dims: list of str, dimensions to sum over
+
+    Returns:
+    - xarray.DataArray with dimensions ('tcenters','time')
+    """
+    right_sum = (var * mask_right).sum(dims)
+    left_sum  = (var * mask_left ).sum(dims)
+    flux = -(right_sum - left_sum) / (tright - tleft)
+    return flux.expand_dims({'tcenters': [tcenter]})
+
+
+def cal_wmb_anomaly_monthly(ds_budgets, adv, gm, tcenters, dt, THETA, more_or_less, maskregion=None):
+    """
+    Calculate monthly water mass budget anomaly terms.
+
+    Parameters
+    ----------
+    ds_budgets : xr.Dataset
+        ECCO budget variables (mass, g_mix_h, g_heat, g_adv, etc.)
+    tcenters : array-like
+        Central times for averaging
+    dt : float
+        Time interval (same unit as tcenters)
+    THETA : xr.DataArray
+        Potential temperature field
+    more_or_less : str
+        Threshold operator for mask3d
+    maskregion : xr.DataArray, optional
+        Regional mask to apply
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with all anomaly terms
+    """
+    rhoconst = 1029.0
+
+    face_connections = {'face':
+                    {0: {'X':  ((12, 'Y', False), (3, 'X', False)),
+                         'Y':  (None,             (1, 'Y', False))},
+                     1: {'X':  ((11, 'Y', False), (4, 'X', False)),
+                         'Y':  ((0, 'Y', False),  (2, 'Y', False))},
+                     2: {'X':  ((10, 'Y', False), (5, 'X', False)),
+                         'Y':  ((1, 'Y', False),  (6, 'X', False))},
+                     3: {'X':  ((0, 'X', False),  (9, 'Y', False)),
+                         'Y':  (None,             (4, 'Y', False))},
+                     4: {'X':  ((1, 'X', False),  (8, 'Y', False)),
+                         'Y':  ((3, 'Y', False),  (5, 'Y', False))},
+                     5: {'X':  ((2, 'X', False),  (7, 'Y', False)),
+                         'Y':  ((4, 'Y', False),  (6, 'Y', False))},
+                     6: {'X':  ((2, 'Y', False),  (7, 'X', False)),
+                         'Y':  ((5, 'Y', False),  (10, 'X', False))},
+                     7: {'X':  ((6, 'X', False),  (8, 'X', False)),
+                         'Y':  ((5, 'X', False),  (10, 'Y', False))},
+                     8: {'X':  ((7, 'X', False),  (9, 'X', False)),
+                         'Y':  ((4, 'X', False),  (11, 'Y', False))},
+                     9: {'X':  ((8, 'X', False),  None),
+                         'Y':  ((3, 'X', False),  (12, 'Y', False))},
+                     10: {'X': ((6, 'Y', False),  (11, 'X', False)),
+                          'Y': ((7, 'Y', False),  (2, 'X', False))},
+                     11: {'X': ((10, 'X', False), (12, 'X', False)),
+                          'Y': ((8, 'Y', False),  (1, 'X', False))},
+                     12: {'X': ((11, 'X', False), None),
+                          'Y': ((9, 'Y', False),  (0, 'X', False))}}}
+    
+    # 时间边界
+    tcenters = np.array(tcenters)
+    tright = tcenters + dt/2.
+    tleft  = tcenters - dt/2.
+    
+    # 保存结果的容器
+    results = {name: [] for name in [
+        "g_mix_h","g_mix_v","g_UpTb_h","g_UpTb_v","g_UbTp_h","g_UbTp_v","g_uptp_h","g_uptp_v","g_UpTp_h","g_UpTp_v",
+        "g_heat","g_tend","g_salt","g_adv","g_gm","Mass"
+    ]}
+    
+    # 区域边界差分
+    if maskregion is not None:
+        _, _, _, boundary_diffs_region = extract_boundary_use_mask(maskregion, face_connections)
+    
+    for i in range(len(tright)):
+        print(f"Processing tcenter = {tcenters[i]}")
+        
+        # === mask: 左右边界
+        mask_right = mask3d(THETA.isel(time=slice(0,-1)), tright[i], more_or_less)
+        mask_left  = mask3d(THETA.isel(time=slice(0,-1)), tleft[i] , more_or_less)
+        if maskregion is not None:
+            mask_right &= maskregion
+            mask_left  &= maskregion
+        
+        # === 混合 & 热通量项
+        for varname in ["g_mix_h","g_mix_v","g_heat","g_UpTb_h","g_UpTb_v","g_UbTp_h","g_UbTp_v","g_uptp_h","g_uptp_v","g_UpTp_h","g_UpTp_v"]:
+            cache = compute_flux_difference(ds_budgets[varname], mask_left, mask_right,
+                                            tleft[i], tright[i], tcenters[i])
+            results[varname].append(cache)
+        
+        # === 水体质量倾向项 (dM/dt)
+        maskTracer = mask3d(THETA, tcenters[i], more_or_less)
+        mask = maskTracer & maskregion if maskregion is not None else maskTracer
+        M = (ds_budgets["Mass"]*mask.rename({"time":"time_mass"})).sum(['face','k','j','i'])
+        results["Mass"].append( M.expand_dims({'tcenters':[tcenters[i]]}) )
+        
+        # 用真实时间差计算 dM/dt
+        #dt_seconds = (M.time_mass[1:].values - M.time_mass[:-1].values) / np.timedelta64(1,'s')
+        dt_seconds = 86400.
+        dmdt = (M[1:].values - M[:-1].values) / dt_seconds
+        dmdt = xr.DataArray(dmdt, dims=['time'], coords={'time': ds_budgets.time})
+        results["g_tend"].append(dmdt.expand_dims({'tcenters':[tcenters[i]]}))
+        
+        # === 淡水通量 (surface fw)
+        tendency_mass_surf = (mask.isel(k=0)*ds_budgets["g_fw"]).astype("float64").sum(['face','j','i'])
+        results["g_salt"].append(tendency_mass_surf.expand_dims({'tcenters': [tcenters[i]]}))
+        
+        
+        # === 平流 & GM 项
+        if maskregion is None:
+        # 无区域定义，水团无平流输运
+            g_adv = xr.zeros_like(tendency_mass_surf)
+            results["g_adv"].append(g_adv.expand_dims({'tcenters':[tcenters[i]]}))
+            g_gm = xr.zeros_like(tendency_mass_surf)
+            results["g_gm"].append(g_gm.expand_dims({'tcenters':[tcenters[i]]}))
+
+        else:
+            maskTracer2 = mask3d(THETA.isel(time=slice(0,-1)), tcenters[i], more_or_less)
+            mask2 = maskTracer2 & maskregion
+            _, _, _, boundary_diffs = extract_boundary_use_mask(mask2, face_connections)
+            _, _, _, boundary_diffs_tracer = extract_boundary_use_mask(maskTracer2, face_connections)
+
+            # 构造边界
+            boundarymask_adv = (boundary_diffs_region != 0) & (boundary_diffs != 0)
+            region_and_tracer_mask = boundarymask_adv & (boundary_diffs_tracer != 0)
+            boundarymask_adv = boundarymask_adv.where(~region_and_tracer_mask, other=False)
+            boundary_adv = boundary_diffs.where(boundarymask_adv, other=0.)
+
+            g_adv = cal_G_adv_surfaceIntegrate2(adv, boundary_adv, rho_pot=None).sum(['face','k','j','i'])
+            results["g_adv"].append(g_adv.expand_dims({'tcenters':[tcenters[i]]}))
+            g_gm = cal_G_adv_surfaceIntegrate2(gm, boundary_adv, rho_pot=None).sum(['face','k','j','i'])
+            results["g_gm"].append(g_gm.expand_dims({'tcenters':[tcenters[i]]}))
+
+#        maskTracer2 = mask3d(THETA.isel(time=slice(0,-1)), tcenters[i], more_or_less)
+#        mask2 = maskTracer2 & maskregion if maskregion is not None else maskTracer2
+#        _, _, _, boundary_diffs = extract_boundary_use_mask(mask2, face_connections)
+#        _, _, _, boundary_diffs_tracer = extract_boundary_use_mask(maskTracer2, face_connections)
+#        
+#        # 构造边界
+#        boundarymask_adv = (boundary_diffs_region != 0) & (boundary_diffs != 0)
+#        region_and_tracer_mask = boundarymask_adv & (boundary_diffs_tracer!=0)
+#        boundarymask_adv = boundarymask_adv.where(~region_and_tracer_mask, other=False)
+#        boundary_adv = boundary_diffs.where(boundarymask_adv, other=0.).compute()
+#        
+#        g_adv = cal_G_adv_surfaceIntegrate2(adv, boundary_adv, rho_pot=None) \
+#                    .sum(['face','k','j','i']).compute()
+#        results["g_adv"].append(g_adv.expand_dims({'tcenters':[tcenters[i]]}))
+#        
+#        g_gm = cal_G_adv_surfaceIntegrate2(gm, boundary_adv, rho_pot=None) \
+#                    .sum(['face','k','j','i']).compute()
+#        results["g_gm"].append(g_gm.expand_dims({'tcenters':[tcenters[i]]}))
+        
+    # 拼接所有变量
+    return xr.Dataset({k: xr.concat(v, dim="tcenters") for k,v in results.items()})
+
+
+def vertical_pairwise_avg(data, tcenters, dtcenters, dim="tcenter", sum_dims=("face", "j", "i")):
+    """
+    Compute vertically integrated pairwise averages along `tcenter`, 
+    handling the first layer separately (single dtcenters[0]).
+    
+    Parameters
+    ----------
+    data : xr.DataArray
+        Input data with dimensions (..., tcenter, face, j, i).
+    tcenters : array-like
+        Midpoint positions along the tcenter dimension.
+    dtcenters : array-like
+        Thickness or spacing corresponding to each tcenter.
+    dim : str, default "tcenter"
+        Name of the vertical coordinate in the input data.
+    sum_dims : tuple of str, default ("face", "j", "i")
+        Dimensions to sum over before averaging.
+        
+    Returns
+    -------
+    xr.DataArray
+        Output DataArray with dimension (time, itcenter),
+        representing pairwise layer averages divided by 
+        (dt[i] + dt[i-1]) for i>=1, and /dt[0] for i=0.
+        Includes coordinate `tcenter_mid` (midpoints for plotting).
+    """
+    newdim="itcenter"
+    
+    # Step 1️⃣: sum over spatial dimensions
+    data_sum = data.sum(list(sum_dims))
+
+    # Step 2️⃣: create new interval indices
+    it = np.arange(len(tcenters))
+
+    # Step 3️⃣: pairwise slices with shared coords
+    left = data_sum.isel({dim: slice(1, None)}).rename({dim: newdim}).assign_coords({newdim: it[1:]})
+    right = data_sum.isel({dim: slice(None, -1)}).rename({dim: newdim}).assign_coords({newdim: it[1:]})
+
+    # Step 4️⃣: denominator for averaging
+    den = xr.DataArray(dtcenters[1:] + dtcenters[:-1],dims=[newdim],coords={newdim: it[1:]})
+
+    # Step 5️⃣: compute averaged part
+    avg = (left + right) / den
+
+    # Step 6️⃣: handle the first layer separately
+    avg0 = data_sum.isel({dim: 0}).rename({dim: newdim}).expand_dims(newdim).assign_coords({newdim: [0]}) / dtcenters[0]
+
+    # Step 7️⃣: concatenate
+    output = xr.concat([avg0, avg], dim=newdim)
+
+    output = output.rename({newdim: dim}).assign_coords({dim: tcenters}).chunk(chunks={dim:-1}).transpose("time",dim)
+
+    return output
+
+
+
+def cal_wmb_anomaly_monthly_onecenter(ds_budgets, adv, gm, tcenter, dt, THETA, more_or_less, maskregion=None):
+    """
+    Calculate water mass budget anomaly terms for a single tcenter.
+
+    Parameters
+    ----------
+    ds_budgets : xr.Dataset
+        ECCO budget variables (mass, g_mix_h, g_heat, g_adv, etc.)
+    adv : xr.DataArray
+        Advection fluxes
+    gm : xr.DataArray
+        GM fluxes
+    tcenter : float
+        Central time for averaging
+    dt : float
+        Time interval
+    THETA : xr.DataArray
+        Potential temperature field
+    more_or_less : str
+        Threshold operator for mask3d
+    maskregion : xr.DataArray, optional
+        Regional mask to apply
+
+    Returns
+    -------
+    xr.Dataset
+        Dataset with all anomaly terms at this tcenter
+    """
+    rhoconst = 1029.0
+
+    face_connections = {'face':
+                    {0: {'X':  ((12, 'Y', False), (3, 'X', False)),
+                         'Y':  (None,             (1, 'Y', False))},
+                     1: {'X':  ((11, 'Y', False), (4, 'X', False)),
+                         'Y':  ((0, 'Y', False),  (2, 'Y', False))},
+                     2: {'X':  ((10, 'Y', False), (5, 'X', False)),
+                         'Y':  ((1, 'Y', False),  (6, 'X', False))},
+                     3: {'X':  ((0, 'X', False),  (9, 'Y', False)),
+                         'Y':  (None,             (4, 'Y', False))},
+                     4: {'X':  ((1, 'X', False),  (8, 'Y', False)),
+                         'Y':  ((3, 'Y', False),  (5, 'Y', False))},
+                     5: {'X':  ((2, 'X', False),  (7, 'Y', False)),
+                         'Y':  ((4, 'Y', False),  (6, 'Y', False))},
+                     6: {'X':  ((2, 'Y', False),  (7, 'X', False)),
+                         'Y':  ((5, 'Y', False),  (10, 'X', False))},
+                     7: {'X':  ((6, 'X', False),  (8, 'X', False)),
+                         'Y':  ((5, 'X', False),  (10, 'Y', False))},
+                     8: {'X':  ((7, 'X', False),  (9, 'X', False)),
+                         'Y':  ((4, 'X', False),  (11, 'Y', False))},
+                     9: {'X':  ((8, 'X', False),  None),
+                         'Y':  ((3, 'X', False),  (12, 'Y', False))},
+                     10: {'X': ((6, 'Y', False),  (11, 'X', False)),
+                          'Y': ((7, 'Y', False),  (2, 'X', False))},
+                     11: {'X': ((10, 'X', False), (12, 'X', False)),
+                          'Y': ((8, 'Y', False),  (1, 'X', False))},
+                     12: {'X': ((11, 'X', False), None),
+                          'Y': ((9, 'Y', False),  (0, 'X', False))}}}
+
+    # 时间边界
+    tright = tcenter + dt/2.
+    tleft  = tcenter - dt/2.
+
+    # 保存结果的容器
+    results = {}
+
+    # 区域边界差分
+    if maskregion is not None:
+        _, _, _, boundary_diffs_region = extract_boundary_use_mask(maskregion, face_connections)
+
+    # === mask: 左右边界
+    mask_right = mask3d(THETA.isel(time=slice(0,-1)), tright, more_or_less)
+    mask_left  = mask3d(THETA.isel(time=slice(0,-1)), tleft , more_or_less)
+    if maskregion is not None:
+        mask_right &= maskregion
+        mask_left  &= maskregion
+
+    # === 混合 & 热通量项
+    for varname in ["g_mix_h","g_mix_v","g_heat","g_UpTb_h","g_UpTb_v",
+                    "g_UbTp_h","g_UbTp_v","g_uptp_h","g_uptp_v","g_UpTp_h","g_UpTp_v"]:
+        cache = compute_flux_difference(ds_budgets[varname], mask_left, mask_right,
+                                        tleft, tright, tcenter)
+        results[varname] = cache.expand_dims({'tcenters':[tcenter]})
+
+    # === 水体质量倾向项 (dM/dt)
+    maskTracer = mask3d(THETA, tcenter, more_or_less)
+    mask = maskTracer & maskregion if maskregion is not None else maskTracer
+    M = (ds_budgets["Mass"]*mask.rename({"time":"time_mass"})).sum(['face','k','j','i'])
+    results["Mass"] = M.expand_dims({'tcenters':[tcenter]})
+
+    # 用真实时间差计算 dM/dt
+    dt_seconds = 86400.  # 如果你要更精确，可以改成差分
+    dmdt = (M[1:].values - M[:-1].values) / dt_seconds
+    dmdt = xr.DataArray(dmdt, dims=['time'], coords={'time': ds_budgets.time})
+    results["g_tend"] = dmdt.expand_dims({'tcenters':[tcenter]})
+
+    # === 淡水通量 (surface fw)
+    tendency_mass_surf = (mask.isel(k=0)*ds_budgets["g_fw"]).astype("float64").sum(['face','j','i'])
+    results["g_salt"] = tendency_mass_surf.expand_dims({'tcenters':[tcenter]})
+
+    # === 平流 & GM 项
+    if maskregion is None:
+        g_adv = xr.zeros_like(tendency_mass_surf)
+        g_gm  = xr.zeros_like(tendency_mass_surf)
+    else:
+        maskTracer2 = mask3d(THETA.isel(time=slice(0,-1)), tcenter, more_or_less)
+        mask2 = maskTracer2 & maskregion
+        _, _, _, boundary_diffs = extract_boundary_use_mask(mask2, face_connections)
+        _, _, _, boundary_diffs_tracer = extract_boundary_use_mask(maskTracer2, face_connections)
+
+        boundarymask_adv = (boundary_diffs_region != 0) & (boundary_diffs != 0)
+        region_and_tracer_mask = boundarymask_adv & (boundary_diffs_tracer != 0)
+        boundarymask_adv = boundarymask_adv.where(~region_and_tracer_mask, other=False)
+        boundary_adv = boundary_diffs.where(boundarymask_adv, other=0.)
+
+        g_adv = cal_G_adv_surfaceIntegrate2(adv, boundary_adv, rho_pot=None).sum(['face','k','j','i'])
+        g_gm  = cal_G_adv_surfaceIntegrate2(gm , boundary_adv, rho_pot=None).sum(['face','k','j','i'])
+
+    results["g_adv"] = g_adv.expand_dims({'tcenters':[tcenter]})
+    results["g_gm"]  = g_gm.expand_dims({'tcenters':[tcenter]})
+
+    return xr.Dataset(results)
 
