@@ -74,11 +74,11 @@ def llc_uv_shift(uds, vds, face_connections, shift_x=0, shift_y=0):
     xarray.Dataset: Shifted U velocity dataset
     """
     if shift_x != 0 and shift_y == 0:
-        uds_shift = uds.shift(i=shift_x)
+        uds_shift = uds.shift(i=shift_x).chunk({'i': -1, 'j': -1})
         direction_x = 'left' if shift_x < 0 else 'right'
         u_shift = handle_boundaries_uv_isel(uds, uds_shift, vds, face_connections, 'X', direction_x, abs(shift_x))
     elif shift_y != 0 and shift_x == 0:
-        uds_shift = uds.shift(j=shift_y)
+        uds_shift = uds.shift(j=shift_y).chunk({'i': -1, 'j': -1})
         direction_y = 'down' if shift_y < 0 else 'up'
         u_shift = handle_boundaries_uv_isel(uds, uds_shift, vds, face_connections, 'Y', direction_y, abs(shift_y))
     elif shift_y != 0 and shift_x != 0:
